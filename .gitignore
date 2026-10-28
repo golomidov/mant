@@ -1,0 +1,18 @@
+# Logs
+logs
+*.log
+
+node_modules
+data/
+.env
+.env.*
+dist
+*.local
+
+.DS_Store
+*.sw?
+
+# Local signed macOS capture bundle
+native/build/
+
+.github/workflows

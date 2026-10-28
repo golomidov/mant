@@ -1,0 +1,37 @@
+:root {
+  font-family: 'Helvetica Neue', system-ui, sans-serif;
+  color: #253a36;
+  background: #f5f7f5;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-size: 14px;
+  font-weight: 400;
+  --text: #253a36;
+  --muted: #586c63;
+  --border: #d9e2dc;
+  --surface: #fff;
+  --soft: #f0f4f1;
+  --accent: #315f4f;
+  --brief-accent: #766295;
+  --audio-accent: #4b7488;
+  --objective-accent: #8a6a27;
+  --observation-accent: #716292;
+  --focus: #254f86;
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+button, input, select, textarea { font: inherit; }
+button, select, summary { cursor: pointer; }
+button, select { border: 1px solid var(--border); border-radius: 5px; background: var(--surface); color: var(--text); padding: 7px 10px; min-height: 34px; }
+button:disabled, select:disabled { cursor: default; opacity: .5; }
+@media (hover: hover) { button:hover:not(:disabled), summary:hover { background: var(--soft); } }
+:focus-visible, label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; }
+h1, h2, h3, p { margin: 0; }
+h1, h2, h3 { text-wrap: balance; }
+p, strong, small, summary, label { overflow-wrap: anywhere; }
+a { color: var(--accent); text-underline-offset: 3px; text-decoration-thickness: from-font; }
+summary { min-height: 34px; line-height: 1.5; }
+input, select, textarea { max-width: 100%; min-width: 0; }
+@media (forced-colors: active) { :focus-visible { outline-color: Highlight; } }
