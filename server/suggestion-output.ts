@@ -109,3 +109,11 @@ export class SuggestionDecoder {
     validate(Type.Object({ records: Type.Array(wireRecordSchema, { minItems: 1, maxItems: 3 }) }, { additionalProperties: false }), JSON.parse(this.buffer))
   }
 }
+
+/** Validate a complete envelope before exposing any of its records. */
+export function completeSuggestionRecords(identity: Pick<SuggestRecord, 'sessionId' | 'runId' | 'requestId'>, value: unknown): SuggestRecord[] {
+  const records: SuggestRecord[] = []
+  const decoder = new SuggestionDecoder(identity, record => records.push(record))
+  decoder.push(JSON.stringify(value)); decoder.finish()
+  return records
+}

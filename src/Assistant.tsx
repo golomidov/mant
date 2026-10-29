@@ -1,3 +1,4 @@
+import { useLanguageOptions } from './use-language-options'
 import { useReport } from './report-hooks'
 import { useEffect, useRef, useState } from 'react'
 import { SavedBriefs } from './SavedBriefs'
@@ -24,6 +25,11 @@ export function BriefEditor({ analysis, send, onDirtyChange, knownUserId, connec
   useEffect(() => { onDirtyChange(editor.dirty || editor.saving || templateWorking) }, [editor.dirty, editor.saving, templateWorking, onDirtyChange])
   useEffect(() => () => controller.dispose(), [controller])
   const { draft, dirty, saving, building, error } = editor
+  const readingLanguage = languageSettings(draft).user, conversationLanguage = languageCode(draft.languages.call)
+  const { options: languages, error: languageError } = useLanguageOptions(readingLanguage, conversationLanguage, connectionEpoch)
+  const readingUnavailable = !!languages && !languages.user.includes(readingLanguage as typeof languages.user[number])
+  const conversationUnavailable = !!languages && (conversationLanguage ? !languages.conversation.includes(conversationLanguage) : !languages.automatic)
+  const languageProblem = languageError || (readingUnavailable ? languages?.excluded.find(e => e.role === 'user' && e.language === readingLanguage)?.reason : conversationUnavailable ? conversationLanguage ? languages?.excluded.find(e => e.role === 'conversation' && e.language === conversationLanguage)?.reason : 'Choose a conversation language. This setup does not support automatic recognition.' : '')
   const update = (change: Partial<Brief>) => controller.update(change)
   const objective = (id: string, change: Partial<Objective>) => update({ objectives: draft.objectives.map(o => o.id === id ? { ...o, ...change, origin: 'explicit' } : o) })
   const me = draft.participants.find(p => p.id === draft.userParticipantId)!
@@ -40,7 +46,7 @@ export function BriefEditor({ analysis, send, onDirtyChange, knownUserId, connec
           <p id="conversation-brief-help" className="help">Include things to learn, say, or achieve, plus context, preferences, boundaries, and answers to clarification questions.</p>
           {analysis.sessionId !== 'preparation' && draft.answers && <div className="legacy-brief-context"><strong>Additional context</strong><p>{draft.answers}</p></div>}
           {analysis.brief.clarifications.length > 0 && <div className="clarifications"><strong>Essential clarifications</strong><ul>{analysis.brief.clarifications.map((q, i) => <li key={i}>{q}</li>)}</ul></div>}
-          <div className="brief-actions"><button className="primary" disabled={!editor.connected || building || analysis.briefStatus === 'analyzing'} onClick={() => { void controller.build() }}>Build objectives</button></div>
+          <div className="brief-actions"><button className="primary" disabled={!editor.connected || building || analysis.briefStatus === 'analyzing' || !languages || readingUnavailable || conversationUnavailable} onClick={() => { void controller.build() }}>Build objectives</button></div>
           <p className="help brief-goal-note">Choose Build objectives to update the list from your conversation brief.</p>
           <section className="brief-people" aria-label="Participants and languages">
             <h3>Participants & languages</h3>
@@ -48,15 +54,19 @@ export function BriefEditor({ analysis, send, onDirtyChange, knownUserId, connec
               <strong>Me</strong>
               <div className="brief-person-fields">
                 <label className="field">My name<input value={me.name} maxLength={4000} onChange={e => update({ participants: draft.participants.map(p => p.id === me.id ? { ...p, name: e.target.value } : p) })} /></label>
-                <label className="field">My language<select value={languageSettings(draft).user} onChange={e => update({ languages: { ...draft.languages, user: e.target.value } })}>{supportedLanguages.map(l => <option key={l.code} value={l.code}>{l.name}</option>)}</select></label>
+                <label className="field">My language<select disabled={!languages} aria-describedby="language-availability" value={readingLanguage} onChange={e => update({ languages: { ...draft.languages, user: e.target.value } })}>{(!languages || readingUnavailable) && <option disabled value={readingLanguage}>{languageName(readingLanguage)} · {languages ? 'unavailable' : 'checking availability…'}</option>}{supportedLanguages.filter(l => languages?.user.includes(l.code)).map(l => <option key={l.code} value={l.code}>{l.name}</option>)}</select></label>
               </div>
             </div>
             <div className="brief-person">
               <strong>Other side</strong>
               <div className="brief-person-fields">
                 <label className="field">Side name<input value={otherSide.name} maxLength={4000} onChange={e => update({ sides: draft.sides.map(side => side.id === otherSide.id ? { ...side, name: e.target.value } : side) })} /></label>
-                <label className="field">Conversation language<select value={languageCode(draft.languages.call)} onChange={e => update({ languages: { ...draft.languages, call: e.target.value } })}><option value="">{languageCode(analysis.detectedLanguage) ? 'Auto · ' + languageName(analysis.detectedLanguage) + ' detected' : 'Auto · detect from speech'}</option>{supportedLanguages.map(l => <option key={l.code} value={l.code}>{l.name}</option>)}</select></label>
+                <label className="field">Conversation language<select disabled={!languages} aria-describedby="language-availability" value={conversationLanguage} onChange={e => update({ languages: { ...draft.languages, call: e.target.value } })}><option value="" disabled={!languages?.automatic}>{!languages?.automatic ? 'Auto · unavailable with this setup' : languageCode(analysis.detectedLanguage) ? 'Auto · ' + languageName(analysis.detectedLanguage) + ' detected' : 'Auto · detect from speech'}</option>{conversationLanguage && (!languages || conversationUnavailable) && <option disabled value={conversationLanguage}>{languageName(conversationLanguage)} · {languages ? 'unavailable' : 'checking availability…'}</option>}{supportedLanguages.filter(l => languages?.conversation.includes(l.code)).map(l => <option key={l.code} value={l.code}>{l.name}</option>)}</select></label>
               </div>
+            </div>
+            <div id="language-availability" className="help" aria-live="polite">{languageProblem ? <p role="alert">{languageProblem} Choose an available language or update backend settings.</p> : !languages ? 'Checking available languages…' : 'Language choices reflect this setup and installed language assets.'}
+              {!!languages?.issues.length && <p>{languages.issues.join(' ')}</p>}
+              {!!languages?.excluded.length && <details><summary>Why some languages are unavailable</summary><ul>{languages.excluded.map(e => <li key={e.role + e.language}>{languageName(e.language)} ({e.role === 'user' ? 'my language' : 'conversation'}): {e.reason}</li>)}</ul></details>}
             </div>
             <p className="help">Replies use the conversation language. Transcripts and replies include a translation into your language when they differ.</p>
           </section>

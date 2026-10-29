@@ -1,12 +1,12 @@
 import type { SuggestionInput } from '../shared/suggestions'
 import { measurePiStream } from './usage'
-import { models, provider } from './interpretation'
+import { models, resolveText, completeStructured, openaiPayload, assertLanguages } from './text-backends'
+import { connectionFor } from './backend-settings'
 import { suggestionReferences } from './interpretation-references'
-import { SuggestionDecoder, suggestionOutputSchema, type SuggestRecord } from './suggestion-output'
+import { SuggestionDecoder, completeSuggestionRecords, suggestionOutputSchema, type SuggestRecord } from './suggestion-output'
 import { callContextRules, callModelContext } from './model-context'
 import { safeMessage } from './errors'
 import type { Tool } from '@earendil-works/pi-ai'
-import { defaultLanguageModel } from '../shared/models'
 export { draftSchema, recordSchema, SuggestionDecoder, type SuggestRecord } from './suggestion-output'
 export type SuggestGenerator = (input: SuggestionInput, signal: AbortSignal, publish: (record: unknown) => void) => Promise<void>
 
@@ -21,29 +21,30 @@ Do not ask for routine confirmation of information already stated clearly. Move 
 Selected wording is intent only, NEVER evidence of anything spoken, accepted, answered or achieved. Do not continue word-by-word coaching during developing partial user speech: return wait. After complete established user speech expresses a goal, offer remaining useful moves. Keep pinned wording steady unless explicitly rephrasing it. Avoid repetition, generic fillers and long speeches.`
 export const generateSuggestions: SuggestGenerator = async (original, signal, publish) => {
   const normalized = suggestionReferences(original), input = normalized.input
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) throw new Error('Suggestion model is not configured.')
-  const modelId = process.env.SUGGEST_MODEL ?? process.env.ANALYSIS_MODEL ?? defaultLanguageModel
-  const model = provider.getModels().find(m => m.id === modelId)
-  if (!model) throw new Error('Suggestion model is not in the Pi catalog.')
-  const decoder = new SuggestionDecoder(input, record => {
+  const restore = (record: SuggestRecord) => {
     const validated = normalized.restore(record) as SuggestRecord
     if (validated.type === 'direction' && (!validated.direction.language || validated.direction.translation === undefined)) throw new Error('Generated replies must declare their speech language and translation.')
-    publish(validated)
-  })
+    return validated
+  }
+  const decoder = new SuggestionDecoder(input, record => publish(restore(record)))
   const context = callModelContext({ brief: input.brief, languages: input.languages, style: input.style, transcript: input.transcript,
     task: { rephrase: input.rephrase, generation: input.generation ?? 'predictive', observations: input.observations, rejectedFindings: input.rejectedFindings ?? [],
       selected: input.selected, recent: input.recent, floor: input.floor } })
   const tool: Tool = { name: 'propose_directions', description: 'Propose grounded conversational directions, or wait.', parameters: suggestionOutputSchema }
+  const connection = connectionFor('suggestions')
+  assertLanguages(connection, [input.languages?.user ?? 'en', input.languages?.conversation ?? ''])
+  if (connection.provider === 'apple-foundation' || connection.capabilities?.incremental === false || (connection.provider !== 'openai' && connection.capabilities?.incremental !== true) || connection.capabilities?.structured === 'json') {
+    const value = await completeStructured('suggestions', input.sessionId, { systemPrompt: suggestionRules + '\n' + callContextRules, messages: context.messages, ...(connection.provider !== 'openai' ? { tools: [tool] } : {}) }, tool, signal, 2000)
+    if (signal.aborted) return
+    const records = completeSuggestionRecords(input, value).map(restore)
+    if (!signal.aborted) for (const record of records) publish(record)
+    return
+  }
+  const { model, apiKey } = resolveText('suggestions')
   const controller = new AbortController()
-  const stream = measurePiStream(input.sessionId, 'SUGGEST', () => models.streamSimple(model, { systemPrompt: suggestionRules + '\n' + callContextRules, messages: context.messages },
+  const stream = measurePiStream(input.sessionId, 'SUGGEST', () => models.streamSimple(model, { systemPrompt: suggestionRules + '\n' + callContextRules, messages: context.messages, ...(connection.provider !== 'openai' ? { tools: [tool] } : {}) },
     { apiKey, signal: AbortSignal.any([signal, controller.signal]), sessionId: `mant:${input.sessionId}:SUGGEST`, cacheRetention: 'short', maxTokens: 2000, maxRetries: 0, timeoutMs: 20_000, temperature: .2,
-      onPayload: payload => ({ ...context.cachePayload(payload, model.compat?.supportsExplicitPromptCacheMode === true),
-        // OpenAI supports nested anyOf objects. Pi's strict-tool converter
-        // rejects those unions, so supply the native strict schema unchanged.
-        tools: [{ type: 'function', name: tool.name, description: tool.description, parameters: suggestionOutputSchema, strict: true }],
-        tool_choice: { type: 'function', name: tool.name }, parallel_tool_calls: false,
-        ...(model.reasoning ? { reasoning: { effort: 'none' } } : {}) }),
+      ...(connection.provider === 'openai' ? { onPayload: (payload: unknown) => openaiPayload(payload, model, tool, context.cachePayload, true) } : {}),
       onProviderStreamEvent: event => {
         if ((event as { type?: string }).type === 'response.refusal.delta') throw new Error('Suggestion request was refused.')
       },

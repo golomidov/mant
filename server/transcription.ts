@@ -3,6 +3,7 @@ import { TranscriptState } from './reconcile'
 import { usageLedger } from './usage'
 import { diagnostic, providerMetadata } from './diagnostics'
 import { safeMessage } from './errors'
+import { credential, type BackendConnection } from './backend-settings'
 import { recognitionLanguages } from '../shared/languages'
 
 export interface TranscriptionTransport {
@@ -39,12 +40,12 @@ export class OpenAITranscription implements TranscriptionTransport {
   private itemSpans = new Map<string, { startMs: number; endMs: number }>()
 
   constructor(private sessionId: string, private sourceId: string, private delay: Delay, private callbacks: TransportCallbacks,
-    private connect: SocketFactory = (url, options) => new WebSocket(url, options), private languages: string[] = recognitionLanguages('')) {
+    private connect: SocketFactory = (url, options) => new WebSocket(url, options), private languages: string[] = recognitionLanguages(''), private connection?: BackendConnection) {
     this.state = new TranscriptState(sessionId, sourceId)
   }
 
   ready(signal: AbortSignal): Promise<void> {
-    const key = process.env.OPENAI_API_KEY
+    const key = this.connection ? credential(this.connection) : process.env.OPENAI_API_KEY
     if (!key) return Promise.reject(new Error('OPENAI_API_KEY is missing from the server environment. Set it and restart the server.'))
     if (signal.aborted) return Promise.reject(new Error('Session stopped.'))
     const startedAt = performance.now()
@@ -67,7 +68,7 @@ export class OpenAITranscription implements TranscriptionTransport {
       signal.addEventListener('abort', abort, { once: true })
       let socket: WebSocket
       try {
-        socket = this.connect('wss://api.openai.com/v1/realtime?intent=transcription', { headers: { Authorization: `Bearer ${key}` } })
+        socket = this.connect(this.connection?.endpoint ?? 'wss://api.openai.com/v1/realtime?intent=transcription', { headers: { Authorization: `Bearer ${key}` } })
       } catch (error) { done(new Error(safeMessage(error instanceof Error ? error.message : 'Unable to connect to OpenAI.'))); return }
       this.socket = socket
       socket.onopen = () => this.configure()
@@ -94,6 +95,7 @@ export class OpenAITranscription implements TranscriptionTransport {
   }
   setLanguages(languages: string[]) {
     if (JSON.stringify(this.languages) === JSON.stringify(languages)) return
+    if (this.socket?.readyState === WebSocket.OPEN) this.commit()
     this.languages = [...languages]
     if (this.socket?.readyState === WebSocket.OPEN) this.configure()
   }

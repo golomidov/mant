@@ -129,3 +129,12 @@ test('commentary, including malformed JSON and assistant delimiters, cannot ente
   expect(records).toHaveLength(1)
   expect(records[0]).toMatchObject({ ...identity, recommended: true, direction: { evidence: [{ segmentId: 'canonical-id', revision: 1 }] } })
 })
+
+test('complete suggestion envelopes validate every record before any publication', async () => {
+  const { completeSuggestionRecords } = await import('../server/suggestion-output')
+  const published: SuggestRecord[] = []
+  expect(() => {
+    for (const record of completeSuggestionRecords(identity, { records: [direction(), { type: 'wait', message: 'Invalid mixture' }] })) published.push(record)
+  }).toThrow()
+  expect(published).toEqual([])
+})

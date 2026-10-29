@@ -13,7 +13,9 @@ import { Archives } from './archive'
 import { FileAudioSource } from './audio'
 import { ConversationSession } from './session'
 import { TranscriptReplay } from './replay'
-import { OpenAITranscription } from './transcription'
+import { createTranscription } from './backend-registry'
+import { backendLanguageOptions, requireBackendLanguages, resolveRecognitionLanguages } from './backend-languages'
+import { backendHealth } from './backend-health'
 import { safeMessage } from './errors'
 import { ConversationTracker } from './tracking'
 import { briefWithPeople, emptyBrief, type AnalysisMode, type Brief } from '../shared/analysis'
@@ -21,7 +23,6 @@ import { SuggestionCoordinator } from './suggestions'
 import type { SuggestionMode } from '../shared/suggestions'
 import { startUsageLog } from './usage'
 import { briefSchema, evidenceSchema, validate } from './analysis-schema'
-import { recognitionLanguages } from '../shared/languages'
 import { NativeCaptureSession, captureInventory } from './native-capture'
 import { parseCaptureSelection, parseCaptureGains, type CaptureSetupState, type CaptureInventory } from '../shared/capture'
 import { captureAttribution } from './capture-attribution'
@@ -94,7 +95,13 @@ function attachTracker(sessionId: string, brief: Brief, enabled: boolean, journa
         }
       }
       if (reason === 'brief_user' || reason === 'brief_model') {
-        if (current instanceof ConversationSession || current instanceof NativeCaptureSession) current.setLanguages(recognitionLanguages(state.brief.languages.call))
+        if (current instanceof ConversationSession || current instanceof NativeCaptureSession) {
+          const session = current, version = state.brief.version
+          void resolveRecognitionLanguages(state.brief).then(languages => { if (current === session && attached.state.brief.version === version) session.setLanguages(languages) }).catch(error => {
+            attached.state.message = safeMessage(error instanceof Error ? error.message : 'Unable to apply conversation language.')
+            for (const socket of [...clients, ...backgrounds]) send(socket, { type: 'error', message: attached.state.message }, sessionId)
+          })
+        }
         // Keep pre-call edits as well as their session-positioned history.
         preparation.state.brief = normalizePreparation(state.brief)
         isolate('preparation-persistence', sessionId, () => archives.savePreparation(preparation.state))
@@ -331,6 +338,8 @@ const server = Bun.serve<unknown>({
         try {
           const body = await request.json() as Record<string, unknown>
           if (body.diagnostic === true) throw new Error('Audio checks are no longer supported. Start a normal capture.')
+          await requireBackendLanguages(preparation.state.brief, 'start')
+          const recognition = await resolveRecognitionLanguages(preparation.state.brief)
           const selection = { ...parseCaptureSelection(body.selection), localParticipantId: preparation.state.brief.userParticipantId ?? null }
           if (selection.localParticipantId && !preparation.state.brief.participants.some(p => p.id === selection.localParticipantId)) throw new Error('Select your participant from the saved brief.')
           captureSetup.configure(selection)
@@ -338,7 +347,7 @@ const server = Bun.serve<unknown>({
           const session = new NativeCaptureSession({ selection, delay: body.delay === 'low' ? 'low' : 'minimal', archives,
             expectedRoute: captureSetup.route ?? undefined, gains: captureSetup.gains(selection),
             routeChanged: route => captureSetup.observeRoute(route),
-            transport: (session, source, delay, callbacks) => new OpenAITranscription(session, source, delay, callbacks, undefined, recognitionLanguages((tracker ?? preparation).state.brief.languages.call)),
+            transport: (session, source, delay, callbacks) => createTranscription(session, source, delay, callbacks, recognition),
             emit: payload => broadcast(payload, session.view.id),
             boundary: (source, atMs) => {
               if (source === 'remote-playback') suggestions?.turnEnd(Math.max(0, atMs))
@@ -392,6 +401,10 @@ const server = Bun.serve<unknown>({
           else if (command.action === 'suggest_release') suggestions.release(string('selectionId'))
           else throw new Error('Invalid suggestion command.')
           return Response.json(suggestions.state)
+        }
+        if ((command.action === 'brief' || command.action === 'extract') && command.brief !== undefined) {
+          await requireBackendLanguages(validate(briefSchema, command.brief), 'edit', target.state.brief)
+          if (loadingPreparation || target !== (tracker ?? preparation)) throw new Error('Preparation or session changed. Try saving again.')
         }
         if (command.action === 'brief' && Number.isInteger(command.version)) target.editBrief(target === preparation ? normalizePreparation(validate(briefSchema, command.brief)) : command.brief, command.version as number, atMs)
         else if (command.action === 'extract') {
@@ -504,7 +517,8 @@ const server = Bun.serve<unknown>({
         if (!await file.exists()) return new Response('Archive not found.', { status: 404 })
         return new Response(file, { headers: { 'Content-Type': 'application/x-ndjson', 'Content-Disposition': `attachment; filename="${archive[1]}.jsonl"` } })
       }
-      if (url.pathname === '/api/health') return Response.json({ ok: true, ffmpeg: !!Bun.which('ffmpeg'), configured: !!process.env.OPENAI_API_KEY })
+      if (url.pathname === '/api/languages') return Response.json(await backendLanguageOptions(url.searchParams.get('user') ?? 'en', url.searchParams.get('conversation') ?? ''))
+      if (url.pathname === '/api/health') { const backends = await backendHealth(); return Response.json({ ok: true, ffmpeg: !!Bun.which('ffmpeg'), configured: backends.every(t => t.available), backends }) }
       if (url.pathname.startsWith('/api/')) return new Response('Not found.', { status: 404 })
       const asset = resolve('dist', `.${decodeURIComponent(url.pathname)}`)
       if (asset !== resolve('dist') && !asset.startsWith(`${resolve('dist')}/`)) return new Response('Not found.', { status: 404 })
@@ -581,10 +595,12 @@ const server = Bun.serve<unknown>({
               if (stored && recording) source = { recording, ...stored }
             }
             if (!source) throw new Error('Recording is unavailable. Upload it again.')
+            await requireBackendLanguages(preparation.state.brief, 'start')
+            const recognition = await resolveRecognitionLanguages(preparation.state.brief)
             const session = new ConversationSession({
               source: source.recording, mode: command.mode, delay: command.delay,
               audio: new FileAudioSource(source.path), archives,
-              transport: (session, source, delay, callbacks) => new OpenAITranscription(session, source, delay, callbacks, undefined, recognitionLanguages((tracker ?? preparation).state.brief.languages.call)),
+              transport: (session, source, delay, callbacks) => createTranscription(session, source, delay, callbacks, recognition),
               emit: payload => broadcast(payload, session.view.id),
             })
             current = session

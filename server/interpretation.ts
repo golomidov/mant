@@ -1,6 +1,5 @@
 import { diagnostic, providerMetadata } from './diagnostics'
-import { createModels, type Tool } from '@earendil-works/pi-ai'
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai'
+import { type Tool } from '@earendil-works/pi-ai'
 import { Agent } from '@earendil-works/pi-agent-core'
 import type { AnalysisRequest, Attribution, Brief, Observation } from '../shared/analysis'
 import type { DirectionSelection } from '../shared/suggestions'
@@ -11,7 +10,9 @@ import { interpretationReferences } from './interpretation-references'
 import { languageSettings } from '../shared/languages'
 import { ModelRequestError, modelRequestError } from './errors'
 import { callContextRules, callModelContext } from './model-context'
-import { defaultLanguageModel } from '../shared/models'
+import { connectionFor } from './backend-settings'
+import { models, provider, resolveText, completeStructured, openaiPayload, assertLanguages } from './text-backends'
+export { models, provider }
 
 export interface InterpretationInput {
   request: AnalysisRequest
@@ -48,23 +49,13 @@ TRACK output consistency: an observation that answers or advances a question MUS
 Short answers to actual spoken questions are meaningful evidence. For example a supplied question "Who is your favorite singer?" followed by a spoken name answers that question, even when ASR emits the surname alone first and the fuller name in a later turn. Cite BOTH the actual question and the answer in observation.evidence AND grounding.quotes; classify the link as contextual. Incorporate later repetition and descriptions into the same finding. Preserve uncertain ASR spelling explicitly; do not invent a name or ignore the supported preference because its spelling may need confirmation. Missing speaker identity does not prevent recording a playback-source claim about that speaker's own preference.
 grounding.unresolved lists ONLY missing completion requirements for the objectives in THAT observation's relations. Never list unrelated open objectives there: a stated name is not incomplete because the person's city or year of birth is unknown.`
 
-function forceProposal(payload: unknown) {
-  const request = payload as Record<string, unknown>
-  return { ...request, tool_choice: { type: 'function', name: 'propose_state' }, parallel_tool_calls: false }
-}
-
-// Only the OpenAI provider is registered. Explicit environment credentials avoid
-// Pi credential stores, config files, OAuth and any client-side secret handling.
-export const provider = openaiProvider()
-export const models = createModels()
-models.setProvider(provider)
-
 const interpretModel: Interpreter = async (mode, input, signal) => {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) throw new ModelRequestError('missing_key')
-  const modelId = process.env.ANALYSIS_MODEL ?? defaultLanguageModel
-  const model = provider.getModels().find(model => model.id === modelId)
-  if (!model) throw new ModelRequestError('unknown_model')
+  const task = mode === 'BRIEF' ? 'brief' : 'analysis'
+  const connection = connectionFor(task)
+  const languages = input.languages ?? languageSettings(input.brief)
+  assertLanguages(connection, [languages.user, languages.conversation])
+  const resolved = connection.provider === 'apple-foundation' ? null : resolveText(task)
+  const model = resolved?.model, apiKey = resolved?.apiKey
   // Keep wire schemas stable: per-request literals/enums precede the system
   // prompt in OpenAI's cache prefix. Exact references are checked locally.
   const schema = mode === 'BRIEF' ? briefExtractionSchema : trackSchemaFor(input, true)
@@ -78,12 +69,17 @@ const interpretModel: Interpreter = async (mode, input, signal) => {
   const { brief, request, ...changing } = modelInput
   const content = JSON.stringify({ mode, brief, languages: input.languages ?? languageSettings(input.brief), ...changing, request, requestId: request.id }) +
     '\nCURRENT TASK: Extract one objective per distinct requested fact, communication point or outcome from the user text below. Merge synonymous restatements; understand/identify/learn the same fact is ONE question. Previous extracted wording is only an ID lookup, never extra requirements. Check full coverage and remove semantic duplicates before calling propose_state. Return sides:[] and participants:[].\n' + JSON.stringify({ preparation: input.brief.preparation, answers: input.brief.answers })
+  if (connection.provider !== 'openai' || resolved?.capabilities.structured !== 'tools') {
+    const result = await completeStructured(task, input.request.sessionId, { systemPrompt: interpretationRules + '\n' + callContextRules, messages: [{ role: 'user', content: JSON.stringify({ mode, ...modelInput }), timestamp: Date.now() }] }, tool, signal)
+    return validate(mode === 'BRIEF' ? briefProposalSchema : trackProposalSchema, result)
+  }
+  if (!model || !apiKey) throw new Error(task + ': model unavailable.')
   const options = { apiKey, signal, sessionId: `mant:${input.request.sessionId}:${mode}:${input.selection ? 'selection' : 'plain'}`, cacheRetention: 'short' as const, maxTokens: 6500, maxRetries: 0, timeoutMs: 45_000 }
   if (mode === 'BRIEF') {
     let proposal: unknown
     const agent = new Agent({
       streamFn: (model, context, agentOptions) => measurePiStream(input.request.sessionId, 'BRIEF', () => models.streamSimple(model, context, { ...agentOptions, ...options,
-        onPayload: forceProposal,
+        onPayload: payload => openaiPayload(payload, model, tool),
       })),
       getApiKey: () => apiKey,
       initialState: { model, systemPrompt: interpretationRules, thinkingLevel: 'off', tools: [{ ...tool, label: 'Extract brief', parameters: schema,
@@ -109,7 +105,7 @@ const interpretModel: Interpreter = async (mode, input, signal) => {
       ambiguousEvidence: input.ambiguousEvidence ?? [], selection: input.selection ? { id: input.selection.id, userParticipantId: input.selection.userParticipantId, speechAfter: input.selection.speechAfter,
         direction: { meaning: input.selection.direction.meaning, move: input.selection.direction.move, opening: input.selection.direction.opening } } : null } })
   const result = await measurePi(input.request.sessionId, 'TRACK', () => models.complete(model, { systemPrompt: interpretationRules + '\n' + callContextRules + '\nInterpret pending speech now. Prior observations are fallible history. Capture facts and preferences that advance supplied objectives, direct questions/requests to the user, and material conditions, commitments or risks. Preserve important unexpected information even without an objective match. Omit unrelated descriptive chatter: NEVER create an observation merely to explain that speech is unrelated to the brief. Do not restate unchanged findings. If no relevant or important change is supported, return empty observations, objectives, openQuestions and replanReasons while still detecting the actual speech language. Keep each meaning, reason and explanation to one concise sentence. Quote only the source words needed to ground the finding.', messages: context.messages, tools: [tool] }, {
-    ...options, toolChoice: { type: 'function', name: tool.name }, onPayload: payload => ({ ...forceProposal(context.cachePayload(payload, model.compat?.supportsExplicitPromptCacheMode === true)), ...(model.reasoning ? { reasoning: { effort: 'none' } } : {}) }),
+    ...options, toolChoice: { type: 'function', name: tool.name }, onPayload: payload => openaiPayload(payload, model, tool, context.cachePayload),
   }))
   if (result.stopReason === 'error' || result.stopReason === 'aborted') throw modelRequestError(result.errorMessage ?? 'Analysis request failed.', 'analysis')
   if (result.stopReason === 'length') throw new ModelRequestError('output_limit', 'analysis')

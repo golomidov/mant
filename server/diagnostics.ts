@@ -1,8 +1,9 @@
 import { join } from 'node:path'
+import { connectionFor, type BackendTask } from './backend-settings'
 import { Persistence } from './persistence'
 
 // Deliberately allowlisted: never log error messages, model content or arbitrary objects.
-const fields = new Set(['sessionId', 'archiveId', 'sourceId', 'workType', 'requestId', 'queueDepth', 'oldestPendingMs', 'durationMs', 'status', 'code', 'providerRequestId', 'audioReceivedMs', 'audioSentMs', 'audioBacklogMs', 'unfinishedTurns', 'lastTranscriptMs', 'eventLoopDelayMs', 'persistenceBacklog', 'persistenceBytes', 'socketBufferedBytes', 'reason', 'dropped'])
+const fields = new Set(['provider', 'model', 'connection', 'sessionId', 'archiveId', 'sourceId', 'workType', 'requestId', 'queueDepth', 'oldestPendingMs', 'durationMs', 'status', 'code', 'providerRequestId', 'audioReceivedMs', 'audioSentMs', 'audioBacklogMs', 'unfinishedTurns', 'lastTranscriptMs', 'eventLoopDelayMs', 'persistenceBacklog', 'persistenceBytes', 'socketBufferedBytes', 'reason', 'dropped'])
 export type Metadata = Record<string, string | number | boolean | null | undefined>
 export function providerMetadata(error: unknown): Metadata {
   if (!error || typeof error !== 'object') return {}
@@ -35,7 +36,12 @@ export class DiagnosticLog {
 }
 let logger: DiagnosticLog | undefined
 export function configureDiagnostics(log: DiagnosticLog) { logger = log }
-export function diagnostic(event: string, metadata?: Metadata) { logger?.record(event, metadata) }
+export function diagnostic(event: string, metadata?: Metadata) {
+  const task: Partial<Record<string, BackendTask>> = { BRIEF: 'brief', TRACK: 'analysis', TRANSLATE: 'translation', SUGGEST: 'suggestions', transcription: 'transcription', 'recognition-start': 'transcription' }
+  const kind = task[String(metadata?.workType)]
+  const c = kind ? connectionFor(kind) : undefined
+  logger?.record(event, { ...(c ? { provider: c.provider, model: c.model, connection: c.id } : {}), ...metadata })
+}
 export function isolate(workType: string, sessionId: string, callback: () => void, failed?: () => void) {
   try { callback() } catch (error) { diagnostic('error', { sessionId, workType, ...providerMetadata(error), reason: 'callback-failed' }); try { failed?.() } catch { /* Local error only. */ } }
 }

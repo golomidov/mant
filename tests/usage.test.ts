@@ -34,3 +34,11 @@ test('server reporter prints changed cumulative totals without repeating idle sn
   ledger.pi('session', 'SUGGEST')(pi); tick(); expect(lines[1]).toContain('cumulative-requests=2')
   stop(); expect(stopped).toBe(true); expect(lines).toHaveLength(2)
 })
+
+test('local audio and Apple task usage have zero API charges while unavailable counts and cloud audio pricing stay unknown', () => {
+  const ledger = new UsageLedger()
+  ledger.audio('local', 60, 'local'); ledger.local('local', 'BRIEF')(true)
+  expect(ledger.snapshot('local')).toMatchObject({ usd: 0, unknownPricing: 0, unknownTokens: 2 })
+  ledger.audio('cloud', 60, 'deepgram')
+  expect(ledger.snapshot('cloud')).toMatchObject({ usd: 0, unknownPricing: 1, unknownTokens: 1, audioSeconds: 60 })
+})

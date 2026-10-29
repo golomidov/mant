@@ -13,9 +13,13 @@
     "build": "tsc -b && bun --bun vite build",
     "lint": "oxlint",
     "capture:build": "bun --no-env-file scripts/build-capture.ts",
-    "diagnostics": "bun --no-env-file scripts/diagnostics.ts"
+    "diagnostics": "bun --no-env-file scripts/diagnostics.ts",
+    "settings": "bun --no-env-file scripts/settings.ts",
+    "ai:build": "bun --no-env-file scripts/build-ai.ts",
+    "benchmark:backends": "bun --no-env-file scripts/benchmark-backends.ts"
   },
   "dependencies": {
+    "@clack/prompts": "^1.8.1",
     "@earendil-works/pi-agent-core": "^1.4.0",
     "@earendil-works/pi-ai": "^1.4.0",
     "react": "^19.3.1",

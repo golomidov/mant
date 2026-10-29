@@ -168,3 +168,15 @@ test('sparse capture timing survives silence suppression, delayed finals and pro
   expect(second.capture?.startMs).toBe(10_000)
   expect(fake.received.filter(e => e.type === 'input_audio_buffer.append')).toHaveLength(2)
 })
+
+test('language changes commit buffered speech before reconfiguring recognition', async () => {
+  const fake = fakeProvider()
+  await fake.adapter.ready(new AbortController().signal)
+  await fake.adapter.append(new Uint8Array(9600))
+  fake.adapter.setLanguages(['it'])
+  await Bun.sleep(1)
+  const events = fake.received.map(event => event.type)
+  expect(events.indexOf('input_audio_buffer.commit')).toBeGreaterThan(events.indexOf('input_audio_buffer.append'))
+  expect(events.lastIndexOf('session.update')).toBeGreaterThan(events.indexOf('input_audio_buffer.commit'))
+  fake.adapter.close()
+})

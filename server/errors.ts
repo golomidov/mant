@@ -1,10 +1,13 @@
+import { backendSettings, credentialName } from './backend-settings'
 export function safeMessage(message: string): string {
-  const key = process.env.OPENAI_API_KEY
-  const redacted = key ? message.replaceAll(key, '[redacted]') : message
+  let redacted = message
+  for (const [name, value] of Object.entries(process.env)) if (value && value.length >= 4 && /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(name)) redacted = redacted.replaceAll(value, '[redacted]')
+  for (const c of Object.values(backendSettings().connections)) { const name = credentialName(c), value = name ? process.env[name] : undefined; if (value) redacted = redacted.replaceAll(value, '[redacted]') }
   return redacted.replace(/\bsk-[\w.*-]+/g, '[redacted]')
 }
 
 const modelMessages = {
+  configuration: 'Backend configuration is incompatible with this task. Run bun run settings -- check.',
   missing_key: 'OPENAI_API_KEY is missing from the server environment. Set it and restart the server.',
   unknown_model: 'ANALYSIS_MODEL is not available in the installed model catalog. Check that setting and restart the server.',
   authentication: 'The model provider rejected the server credentials. Check the API key and retry.',
@@ -26,16 +29,17 @@ const analysisMessages: Record<keyof typeof modelMessages, string> = {
 }
 export class ModelRequestError extends Error {
   readonly code: keyof typeof modelMessages
-  constructor(code: keyof typeof modelMessages, readonly task: 'brief' | 'analysis' = 'brief') { super((task === 'analysis' ? analysisMessages : modelMessages)[code]); this.name = 'ModelRequestError'; this.code = code }
+  constructor(code: keyof typeof modelMessages, readonly task: 'brief' | 'analysis' = 'brief', detail?: string) { super(detail ?? (task === 'analysis' ? analysisMessages : modelMessages)[code]); this.name = 'ModelRequestError'; this.code = code }
 }
 export function modelRequestError(error: unknown, task: 'brief' | 'analysis' = 'brief'): ModelRequestError {
   if (error instanceof ModelRequestError) return error.task === task ? error : new ModelRequestError(error.code, task)
   const message = error instanceof Error ? error.message : String(error)
+  if (/is missing|not in the .*Pi catalog|unsupported task language|requires? .*streaming|use the Apple|Apple AI helper|structured output mode|does not support structured|incompatible|Foundation Models|Apple Translation|Apple Speech/i.test(message)) return new ModelRequestError('configuration', task, safeMessage(message))
   const code = /invalid.*schema|invalid_function_parameters|requires JSON-schema|constrained sampling|object and array unions are unsupported/i.test(message) ? 'schema'
     : /401|403|incorrect.*key|invalid.*key|authentication|permission/i.test(message) ? 'authentication'
     : /429|quota|rate.?limit/i.test(message) ? 'quota'
     : /timeout|timed out|deadline exceeded/i.test(message) ? 'timeout'
     : /connection|network|fetch failed|ECONN|ENOTFOUND/i.test(message) ? 'connection'
     : /structured|proposal|Invalid .*reference|Brief IDs/i.test(message) ? 'invalid_proposal' : 'request'
-  return new ModelRequestError(code)
+  return new ModelRequestError(code, task)
 }
